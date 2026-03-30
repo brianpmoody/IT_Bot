@@ -48,13 +48,14 @@ async function actualizarEstado(id, estado) {
     });
 }
 
-// 🔹 START
+// 🔹 START (ACTUALIZADO 🔥)
 bot.onText(/\/start/, (msg) => {
     bot.sendMessage(msg.chat.id, "👋 Bienvenido al sistema TI", {
         reply_markup: {
             keyboard: [
                 ["🎫 Nuevo Ticket"],
-                ["📋 Mis Tickets", "❓ Ayuda"]
+                ["📋 Mis Tickets", "🗂 Historial"],
+                ["❓ Ayuda"]
             ],
             resize_keyboard: true
         }
@@ -147,23 +148,27 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-// 📝 MENSAJES
+// 📝 MENSAJES (ACTUALIZADO 🔥)
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
     if (text === "🎫 Nuevo Ticket") return iniciarTicket(chatId);
 
+    // 📋 MIS TICKETS (solo activos)
     if (text === "📋 Mis Tickets") {
         try {
             const tickets = await obtenerTickets();
 
             const lista = tickets
-                .filter(t => t.usuario === msg.from.first_name)
+                .filter(t => 
+                    t.usuario === msg.from.first_name &&
+                    t.estado !== "Cerrado"
+                )
                 .slice(-5);
 
             if (!lista.length) {
-                return bot.sendMessage(chatId, "📭 No tienes tickets");
+                return bot.sendMessage(chatId, "📭 No tienes tickets activos");
             }
 
             for (let t of lista) {
@@ -186,6 +191,38 @@ bot.on('message', async (msg) => {
         } catch (e) {
             console.error(e);
             bot.sendMessage(chatId, "❌ Error al obtener tickets");
+        }
+
+        return;
+    }
+
+    // 🗂 HISTORIAL (NUEVO 🔥)
+    if (text === "🗂 Historial") {
+        try {
+            const tickets = await obtenerTickets();
+
+            const lista = tickets
+                .filter(t => t.usuario === msg.from.first_name)
+                .slice(-10);
+
+            if (!lista.length) {
+                return bot.sendMessage(chatId, "📭 No tienes historial");
+            }
+
+            for (let t of lista) {
+                await bot.sendMessage(chatId, `
+🎫 ${t.id}
+📌 ${t.tipo}
+🏢 ${t.sucursal}
+👤 ${t.reportante}
+⚡ ${t.prioridad}
+📊 ${t.estado}
+                `);
+            }
+
+        } catch (e) {
+            console.error(e);
+            bot.sendMessage(chatId, "❌ Error al obtener historial");
         }
 
         return;
