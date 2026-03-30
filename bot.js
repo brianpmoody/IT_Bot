@@ -5,7 +5,7 @@ const axios = require('axios');
 // 🔐 Variables de entorno
 const token = process.env.TOKEN;
 const SHEET_URL = process.env.SHEET_URL;
-const GRUPO_ID = process.env.GRUPO_ID; // opcional
+const GRUPO_ID = process.env.GRUPO_ID;
 
 const bot = new TelegramBot(token, { polling: true });
 
@@ -16,14 +16,11 @@ require('http').createServer((req, res) => res.end('ok')).listen(3000);
 let usuarios = {};
 let contador = 1;
 
-// 🎯 Comando inicio
-bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, `👋 Bienvenido al sistema de soporte TI\n\nEscribe /nuevo para crear un ticket`);
-});
-
-// 🎫 Crear ticket
-bot.onText(/\/nuevo/, (msg) => {
-    const chatId = msg.chat.id;
+// 🧩 FUNCIÓN REUTILIZABLE (NUEVO)
+function iniciarTicket(chatId) {
+    if (usuarios[chatId]) {
+        return bot.sendMessage(chatId, "⚠️ Ya tienes un ticket en proceso");
+    }
 
     usuarios[chatId] = {
         paso: 'tipo'
@@ -39,9 +36,27 @@ bot.onText(/\/nuevo/, (msg) => {
             ]
         }
     });
+}
+
+// 🎯 Comando inicio (MEJORADO)
+bot.onText(/\/start/, (msg) => {
+    bot.sendMessage(msg.chat.id, "👋 Bienvenido al sistema de soporte TI", {
+        reply_markup: {
+            keyboard: [
+                ["🎫 Nuevo Ticket"],
+                ["❓ Ayuda"]
+            ],
+            resize_keyboard: true
+        }
+    });
 });
 
-// 🔘 Manejo de botones
+// 🎫 Comando /nuevo (ahora reutiliza función)
+bot.onText(/\/nuevo/, (msg) => {
+    iniciarTicket(msg.chat.id);
+});
+
+// 🔘 Manejo de botones inline
 bot.on('callback_query', (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
@@ -95,18 +110,29 @@ bot.on('callback_query', (query) => {
     bot.answerCallbackQuery(query.id);
 });
 
-// 📝 Mensajes (texto o foto)
+// 📝 Mensajes (INTEGRADO CON BOTÓN)
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
+    const text = msg.text;
+
+    // 🎫 BOTÓN NUEVO TICKET (NUEVO)
+    if (text === "🎫 Nuevo Ticket") {
+        return iniciarTicket(chatId);
+    }
+
+    // ❓ AYUDA (opcional)
+    if (text === "❓ Ayuda") {
+        return bot.sendMessage(chatId, "Usa el botón 🎫 para crear un ticket");
+    }
 
     if (!usuarios[chatId]) return;
-    if (msg.text && msg.text.startsWith('/')) return;
+    if (text && text.startsWith('/')) return;
 
     const estado = usuarios[chatId];
 
     // Descripción
     if (estado.paso === "descripcion") {
-        estado.descripcion = msg.text || "Sin descripción";
+        estado.descripcion = text || "Sin descripción";
         estado.paso = "prioridad";
 
         return bot.sendMessage(chatId, "Selecciona prioridad:", {
@@ -144,17 +170,14 @@ async function guardarTicket(chatId, user) {
             prioridad: data.prioridad
         };
 
-        // Enviar a Google Sheets
-      await axios.post(SHEET_URL, payload, {
-  headers: {
-    'Content-Type': 'application/json'
-  }
-});
+        await axios.post(SHEET_URL, payload, {
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
 
-        // Confirmación usuario
         bot.sendMessage(chatId, `✅ Ticket creado: ${ticketID}`);
 
-        // Notificación a grupo
         if (GRUPO_ID) {
             bot.sendMessage(GRUPO_ID, `
 🚨 *Nuevo Ticket*
