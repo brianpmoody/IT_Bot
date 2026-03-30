@@ -16,7 +16,7 @@ require('http').createServer((req, res) => res.end('ok')).listen(3000);
 let usuarios = {};
 let contador = 1;
 
-// 🧩 FUNCIÓN REUTILIZABLE (NUEVO)
+// 🧩 FUNCIÓN REUTILIZABLE
 function iniciarTicket(chatId) {
     if (usuarios[chatId]) {
         return bot.sendMessage(chatId, "⚠️ Ya tienes un ticket en proceso");
@@ -38,32 +38,37 @@ function iniciarTicket(chatId) {
     });
 }
 
-// 🎯 Comando inicio (MEJORADO)
+// 📥 Obtener tickets desde Google Sheets
+async function obtenerTickets() {
+    const res = await axios.get(SHEET_URL);
+    return res.data;
+}
+
+// 🎯 START (ACTUALIZADO)
 bot.onText(/\/start/, (msg) => {
     bot.sendMessage(msg.chat.id, "👋 Bienvenido al sistema de soporte TI", {
         reply_markup: {
             keyboard: [
                 ["🎫 Nuevo Ticket"],
-                ["❓ Ayuda"]
+                ["📋 Mis Tickets", "❓ Ayuda"]
             ],
             resize_keyboard: true
         }
     });
 });
 
-// 🎫 Comando /nuevo (ahora reutiliza función)
+// 🎫 Comando /nuevo
 bot.onText(/\/nuevo/, (msg) => {
     iniciarTicket(msg.chat.id);
 });
 
-// 🔘 Manejo de botones inline
+// 🔘 BOTONES INLINE
 bot.on('callback_query', (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
 
     if (!usuarios[chatId]) return;
 
-    // Tipo
     if (data.startsWith("tipo_")) {
         usuarios[chatId].tipo = data.split("_")[1];
         usuarios[chatId].paso = "descripcion";
@@ -71,7 +76,6 @@ bot.on('callback_query', (query) => {
         bot.sendMessage(chatId, "📝 Describe el problema:");
     }
 
-    // Prioridad
     if (data.startsWith("prioridad_")) {
         usuarios[chatId].prioridad = data.split("_")[1];
         usuarios[chatId].paso = "confirmacion";
@@ -96,12 +100,10 @@ bot.on('callback_query', (query) => {
         });
     }
 
-    // Confirmar
     if (data === "confirmar") {
         guardarTicket(chatId, query.from);
     }
 
-    // Cancelar
     if (data === "cancelar") {
         delete usuarios[chatId];
         bot.sendMessage(chatId, "❌ Ticket cancelado");
@@ -110,17 +112,49 @@ bot.on('callback_query', (query) => {
     bot.answerCallbackQuery(query.id);
 });
 
-// 📝 Mensajes (INTEGRADO CON BOTÓN)
-bot.on('message', (msg) => {
+// 📝 MENSAJES (AHORA ASYNC)
+bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    // 🎫 BOTÓN NUEVO TICKET (NUEVO)
+    // 🎫 NUEVO TICKET
     if (text === "🎫 Nuevo Ticket") {
         return iniciarTicket(chatId);
     }
 
-    // ❓ AYUDA (opcional)
+    // 📋 MIS TICKETS (NUEVO 🔥)
+    if (text === "📋 Mis Tickets") {
+        try {
+            const tickets = await obtenerTickets();
+
+            const misTickets = tickets
+                .filter(t => t.usuario === msg.from.first_name)
+                .slice(-5);
+
+            if (misTickets.length === 0) {
+                return bot.sendMessage(chatId, "📭 No tienes tickets registrados");
+            }
+
+            let mensaje = "📋 *Tus últimos tickets:*\n\n";
+
+            misTickets.forEach(t => {
+                mensaje += `🎫 ${t.id}
+📌 ${t.tipo}
+⚡ ${t.prioridad}
+📝 ${t.descripcion}
+
+`;
+            });
+
+            return bot.sendMessage(chatId, mensaje, { parse_mode: "Markdown" });
+
+        } catch (error) {
+            console.error(error);
+            return bot.sendMessage(chatId, "❌ Error al obtener tickets");
+        }
+    }
+
+    // ❓ AYUDA
     if (text === "❓ Ayuda") {
         return bot.sendMessage(chatId, "Usa el botón 🎫 para crear un ticket");
     }
@@ -130,7 +164,6 @@ bot.on('message', (msg) => {
 
     const estado = usuarios[chatId];
 
-    // Descripción
     if (estado.paso === "descripcion") {
         estado.descripcion = text || "Sin descripción";
         estado.paso = "prioridad";
@@ -146,7 +179,6 @@ bot.on('message', (msg) => {
         });
     }
 
-    // Foto opcional
     if (msg.photo) {
         const fileId = msg.photo[msg.photo.length - 1].file_id;
         estado.foto = fileId;
@@ -155,7 +187,7 @@ bot.on('message', (msg) => {
     }
 });
 
-// 💾 Guardar ticket
+// 💾 GUARDAR TICKET
 async function guardarTicket(chatId, user) {
     try {
         const ticketID = "TI-" + String(contador).padStart(4, '0');
