@@ -6,6 +6,28 @@ const axios = require('axios');
 const token = process.env.TOKEN;
 const SHEET_URL = process.env.SHEET_URL;
 const GRUPO_ID = process.env.GRUPO_ID; // opcional
+const bot = new TelegramBot(token, { polling: true });
+
+let usuarios = {};
+let contador = 1;
+
+// 👇 AQUÍ VA
+function iniciarTicket(chatId) {
+    usuarios[chatId] = {
+        paso: 'tipo'
+    };
+
+    bot.sendMessage(chatId, "Selecciona el tipo de problema:", {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "🌐 Red", callback_data: "tipo_Red" }],
+                [{ text: "🖨 Impresora", callback_data: "tipo_Impresora" }],
+                [{ text: "💻 Sistema", callback_data: "tipo_Sistema" }],
+                [{ text: "📹 Cámaras", callback_data: "tipo_Camaras" }]
+            ]
+        }
+    });
+}
 
 const bot = new TelegramBot(token, { polling: true });
 
