@@ -45,7 +45,24 @@ const axiosInstance = axios.create({ timeout: 5000 });
 
 async function obtenerTickets() {
     const res = await axiosInstance.get(SHEET_URL);
-    return res.data;
+    // Sheets a veces devuelve un objeto en vez de array — normalizamos siempre
+    const data = res.data;
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === 'object') return Object.values(data);
+    return [];
+}
+
+// Busca los tickets de un usuario de forma tolerante:
+// 1) Si el ticket tiene userId → compara por ID numérico (robusto)
+// 2) Si el ticket es viejo y no tiene userId → cae a comparar por nombre (compatibilidad)
+function ticketsDeUsuario(tickets, userId, userName) {
+    return tickets.filter(t => {
+        if (t.userId !== undefined && t.userId !== null && t.userId !== '') {
+            return String(t.userId).trim() === String(userId).trim();
+        }
+        // Compatibilidad con tickets guardados antes del fix
+        return String(t.usuario || '').trim() === String(userName || '').trim();
+    });
 }
 
 async function guardarEnSheets(payload) {
@@ -268,10 +285,13 @@ bot.on('message', async (msg) => {
     if (text === '📋 Mis Tickets') {
         try {
             const tickets = await obtenerTickets();
-            // FIX #3 — filtrar por userId numérico
-            const lista = tickets
-                .filter(t => String(t.userId) === String(userId) && t.estado !== 'Cerrado')
+            console.log(`[DEBUG] Total tickets en Sheets: ${tickets.length}`);
+            console.log(`[DEBUG] userId buscado: ${userId} | userName: ${msg.from.first_name}`);
+            if (tickets.length > 0) console.log(`[DEBUG] Primer ticket:`, JSON.stringify(tickets[0]));
+            const lista = ticketsDeUsuario(tickets, userId, msg.from.first_name)
+                .filter(t => t.estado !== 'Cerrado')
                 .slice(-5);
+            console.log(`[DEBUG] Tickets activos encontrados: ${lista.length}`);
 
             if (!lista.length) {
                 return bot.sendMessage(chatId, '📭 No tienes tickets activos.');
@@ -302,10 +322,10 @@ bot.on('message', async (msg) => {
     if (text === '🗂 Historial') {
         try {
             const tickets = await obtenerTickets();
-            // FIX #3 — filtrar por userId numérico
-            const lista = tickets
-                .filter(t => String(t.userId) === String(userId))
+            console.log(`[DEBUG] Historial — Total tickets: ${tickets.length} | userId: ${userId}`);
+            const lista = ticketsDeUsuario(tickets, userId, msg.from.first_name)
                 .slice(-10);
+            console.log(`[DEBUG] Historial encontrado: ${lista.length}`);
 
             if (!lista.length) {
                 return bot.sendMessage(chatId, '📭 No tienes historial de tickets.');
