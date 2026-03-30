@@ -145,14 +145,56 @@ bot.onText(/\/start/, (msg) => {
 });
 
 bot.onText(/\/nuevo/,    (msg) => iniciarTicket(msg.chat.id));
-bot.onText(/\/cancelar/, (msg) => cancelarSesion(msg.chat.id));
+bot.onText(/\/cancelar/, (msg) => manejarCancelar(msg.chat.id, msg.from));
 
-function cancelarSesion(chatId) {
+// FIX: Cancelar tiene dos comportamientos distintos:
+// 1) Si el usuario está en medio de CREAR un ticket (sesión en memoria) → descarta esa sesión.
+// 2) Si NO está creando un ticket → busca sus tickets activos en Sheets y le pide que elija cuál cancelar.
+async function manejarCancelar(chatId, from) {
+    // Caso 1: hay un flujo de creación activo en memoria
     if (usuarios[chatId]) {
         delete usuarios[chatId];
-        bot.sendMessage(chatId, '❌ Ticket cancelado.', { reply_markup: TECLADO_PRINCIPAL });
-    } else {
-        bot.sendMessage(chatId, 'No tienes ningún ticket en proceso.');
+        return bot.sendMessage(chatId, '❌ Creación de ticket cancelada.', { reply_markup: TECLADO_PRINCIPAL });
+    }
+
+    // Caso 2: buscar tickets activos en Sheets para cancelar uno
+    try {
+        const tickets = await obtenerTickets();
+        const activos = ticketsDeUsuario(tickets, from.id, from.first_name)
+            .filter(t => t.estado !== 'Cerrado');
+
+        if (!activos.length) {
+            return bot.sendMessage(chatId, '📭 No tienes tickets activos para cancelar.');
+        }
+
+        // Si solo hay uno, cancelar directo
+        if (activos.length === 1) {
+            const t = activos[0];
+            return bot.sendMessage(chatId, `¿Cancelar el ticket *${t.id}* (${t.tipo} – ${t.sucursal})?`, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '✅ Sí, cancelar', callback_data: `cancelarticket__${t.id}` },
+                        { text: '🔙 No',           callback_data: 'ignorar' },
+                    ]],
+                },
+            });
+        }
+
+        // Si hay varios, mostrar lista para que elija
+        const botones = activos.map(t => ([{
+            text: `${t.id} – ${t.tipo} (${t.estado})`,
+            callback_data: `cancelarticket__${t.id}`,
+        }]));
+        botones.push([{ text: '🔙 No cancelar nada', callback_data: 'ignorar' }]);
+
+        return bot.sendMessage(chatId, '¿Cuál ticket deseas cancelar?', {
+            reply_markup: { inline_keyboard: botones },
+        });
+
+    } catch (e) {
+        console.error('[CANCELAR]', e);
+        bot.sendMessage(chatId, '❌ Error al buscar tus tickets. Intenta más tarde.');
     }
 }
 
@@ -164,15 +206,37 @@ bot.on('callback_query', async (query) => {
 
     await bot.answerCallbackQuery(query.id);
 
+    // ── Ignorar (botón "No" en confirmación de cancelación) ──
+    if (data === 'ignorar') {
+        return bot.sendMessage(chatId, '👍 Sin cambios.');
+    }
+
+    // ── Cancelar un ticket YA GUARDADO en Sheets ──
+    // Formato: "cancelarticket__TI-0001"
+    if (data.startsWith('cancelarticket__')) {
+        const ticketId = data.split('__')[1];
+        try {
+            await actualizarEstado(ticketId, 'Cerrado');
+            bot.sendMessage(chatId, `✅ Ticket *${ticketId}* cancelado.`, {
+                parse_mode: 'Markdown',
+                reply_markup: TECLADO_PRINCIPAL,
+            });
+        } catch (e) {
+            console.error('[CANCELAR TICKET]', e);
+            bot.sendMessage(chatId, '❌ Error al cancelar el ticket. Intenta más tarde.');
+        }
+        return;
+    }
+
     // ── Confirmar ticket ──
     if (data === 'confirmar') {
         return guardarTicket(chatId, query.from);
     }
 
-    // ── Cancelar ticket (botón inline en el resumen) ──
+    // ── Cancelar creación (botón inline en el resumen) ──
     if (data === 'cancelar') {
         delete usuarios[chatId];
-        return bot.sendMessage(chatId, '❌ Ticket cancelado.', { reply_markup: TECLADO_PRINCIPAL });
+        return bot.sendMessage(chatId, '❌ Creación cancelada.', { reply_markup: TECLADO_PRINCIPAL });
     }
 
     // ── FIX #3: Solicitar cambio de estado ───────────────────────────────────
@@ -284,7 +348,7 @@ bot.on('message', async (msg) => {
     if (text.includes('Nuevo Ticket')) return iniciarTicket(chatId);
 
     // FIX #1 — Cancelar desde el teclado principal
-    if (text.includes('Cancelar Ticket')) return cancelarSesion(chatId);
+    if (text.includes('Cancelar Ticket')) return manejarCancelar(chatId, msg.from);
 
     // ── Mis Tickets ──
     if (text.includes('Mis Tickets')) {
