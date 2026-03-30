@@ -8,287 +8,412 @@ const GRUPO_ID = process.env.GRUPO_ID;
 
 const bot = new TelegramBot(token, { polling: true });
 
-require('http').createServer((req, res) => res.end('ok')).listen(3000);
+// ─── Health check (para plataformas como Render/Railway) ──────────────────────
+require('http').createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+}).listen(process.env.PORT || 3000);
 
+// ─── Estado en memoria ────────────────────────────────────────────────────────
 let usuarios = {};
-let contador = 1;
+const SESSION_TTL = 30 * 60 * 1000; // 30 minutos
 
-// 🔹 Iniciar ticket
-function iniciarTicket(chatId) {
-    if (usuarios[chatId]) {
-        return bot.sendMessage(chatId, "⚠️ Ya tienes un ticket en proceso");
-    }
-
-    usuarios[chatId] = { paso: 'tipo' };
-
-    bot.sendMessage(chatId, "Selecciona el tipo de problema:", {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: "🌐 Red", callback_data: "tipo_Red" }],
-                [{ text: "🖨 Impresora", callback_data: "tipo_Impresora" }],
-                [{ text: "💻 Sistema", callback_data: "tipo_Sistema" }],
-                [{ text: "📹 Cámaras", callback_data: "tipo_Camaras" }]
-            ]
+// Limpia sesiones expiradas cada 10 minutos
+setInterval(() => {
+    const ahora = Date.now();
+    for (const chatId in usuarios) {
+        if (ahora - usuarios[chatId].timestamp > SESSION_TTL) {
+            delete usuarios[chatId];
+            console.log(`Sesión expirada eliminada: ${chatId}`);
         }
-    });
+    }
+}, 10 * 60 * 1000);
+
+// ─── Helpers de sesión ────────────────────────────────────────────────────────
+function crearSesion(chatId, datos = {}) {
+    usuarios[chatId] = { ...datos, timestamp: Date.now() };
 }
 
-// 🔹 Obtener tickets
+function actualizarSesion(chatId, datos = {}) {
+    if (usuarios[chatId]) {
+        usuarios[chatId] = { ...usuarios[chatId], ...datos, timestamp: Date.now() };
+    }
+}
+
+// ─── API Google Sheets ────────────────────────────────────────────────────────
+const axiosInstance = axios.create({ timeout: 5000 });
+
 async function obtenerTickets() {
-    const res = await axios.get(SHEET_URL);
+    const res = await axiosInstance.get(SHEET_URL);
     return res.data;
 }
 
-// 🔹 Actualizar estado
+async function guardarEnSheets(payload) {
+    await axiosInstance.post(SHEET_URL, payload);
+}
+
+// FIX #4 — Genera el próximo ID consultando el contador real en Sheets
+async function obtenerProximoId() {
+    try {
+        const tickets = await obtenerTickets();
+        if (!Array.isArray(tickets) || tickets.length === 0) return 'TI-0001';
+        // Extrae el número más alto de los IDs existentes
+        const numeros = tickets
+            .map(t => parseInt((t.id || '').replace('TI-', ''), 10))
+            .filter(n => !isNaN(n));
+        const siguiente = numeros.length > 0 ? Math.max(...numeros) + 1 : 1;
+        return 'TI-' + String(siguiente).padStart(4, '0');
+    } catch {
+        // Si falla la lectura, usa timestamp como fallback seguro
+        return 'TI-' + Date.now();
+    }
+}
+
+// FIX #6 — actualizarEstado con manejo de errores
 async function actualizarEstado(id, estado) {
-    await axios.post(SHEET_URL, {
-        action: "update",
-        id,
-        estado
+    await axiosInstance.post(SHEET_URL, { action: 'update', id, estado });
+}
+
+// ─── Validaciones ─────────────────────────────────────────────────────────────
+const MAX_CHARS = 500;
+
+function validarTexto(text) {
+    if (!text || text.trim().length === 0) return '⚠️ El campo no puede estar vacío.';
+    if (text.length > MAX_CHARS) return `⚠️ Máximo ${MAX_CHARS} caracteres (recibí ${text.length}).`;
+    return null;
+}
+
+// ─── Notificación al grupo ────────────────────────────────────────────────────
+async function notificarGrupo(ticket) {
+    if (!GRUPO_ID) return;
+    const msg =
+        `🆕 *Nuevo ticket creado*\n\n` +
+        `🎫 ID: ${ticket.id}\n` +
+        `📌 Tipo: ${ticket.tipo}\n` +
+        `🏢 Sucursal: ${ticket.sucursal}\n` +
+        `👤 Reporta: ${ticket.reportante}\n` +
+        `📝 ${ticket.descripcion}\n` +
+        `⚡ Prioridad: ${ticket.prioridad}\n` +
+        `👁 Usuario TG: ${ticket.usuario}`;
+    try {
+        await bot.sendMessage(GRUPO_ID, msg, { parse_mode: 'Markdown' });
+    } catch (e) {
+        console.error('Error al notificar al grupo:', e.message);
+    }
+}
+
+// ─── Iniciar ticket ───────────────────────────────────────────────────────────
+function iniciarTicket(chatId) {
+    if (usuarios[chatId]) {
+        return bot.sendMessage(chatId, '⚠️ Ya tienes un ticket en proceso. Complétalo o cancélalo primero.');
+    }
+
+    crearSesion(chatId, { paso: 'tipo' });
+
+    bot.sendMessage(chatId, '🛠 Selecciona el tipo de problema:', {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '🌐 Red', callback_data: 'tipo__Red' }],
+                [{ text: '🖨 Impresora', callback_data: 'tipo__Impresora' }],
+                [{ text: '💻 Sistema', callback_data: 'tipo__Sistema' }],
+                [{ text: '📹 Cámaras', callback_data: 'tipo__Camaras' }],
+            ],
+        },
     });
 }
 
-// 🔹 START (ACTUALIZADO 🔥)
+// ─── /start ───────────────────────────────────────────────────────────────────
 bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, "👋 Bienvenido al sistema TI", {
+    bot.sendMessage(msg.chat.id, '👋 Bienvenido al sistema de soporte TI', {
         reply_markup: {
             keyboard: [
-                ["🎫 Nuevo Ticket"],
-                ["📋 Mis Tickets", "🗂 Historial"],
-                ["❓ Ayuda"]
+                ['🎫 Nuevo Ticket'],
+                ['📋 Mis Tickets', '🗂 Historial'],
+                ['❓ Ayuda'],
             ],
-            resize_keyboard: true
-        }
+            resize_keyboard: true,
+        },
     });
 });
 
 bot.onText(/\/nuevo/, (msg) => iniciarTicket(msg.chat.id));
 
-// 🔘 CALLBACKS
+bot.onText(/\/cancelar/, (msg) => {
+    const chatId = msg.chat.id;
+    if (usuarios[chatId]) {
+        delete usuarios[chatId];
+        bot.sendMessage(chatId, '❌ Ticket cancelado.');
+    } else {
+        bot.sendMessage(chatId, 'No tienes ningún ticket en proceso.');
+    }
+});
+
+// ─── CALLBACKS ────────────────────────────────────────────────────────────────
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
+    const userId = query.from.id; // FIX #3 — usar ID numérico, no nombre
     const data = query.data;
 
-    // 👉 CAMBIAR ESTADO
-    if (data.startsWith("estado_")) {
-        const ticketId = data.split("_")[1];
+    await bot.answerCallbackQuery(query.id);
 
-        usuarios[chatId] = {
-            paso: "estado",
-            ticketId
-        };
+    // ── Solicitar cambio de estado ──
+    if (data.startsWith('estado__')) {
+        const ticketId = data.split('__')[1];
 
-        return bot.sendMessage(chatId, "Selecciona nuevo estado:", {
+        // FIX #7 — Verificar que el ticket pertenece al usuario
+        try {
+            const tickets = await obtenerTickets();
+            const ticket = tickets.find(t => t.id === ticketId);
+
+            if (!ticket) {
+                return bot.sendMessage(chatId, '❌ Ticket no encontrado.');
+            }
+            if (String(ticket.userId) !== String(userId)) {
+                return bot.sendMessage(chatId, '⛔ No tienes permiso para modificar este ticket.');
+            }
+        } catch (e) {
+            console.error(e);
+            return bot.sendMessage(chatId, '❌ Error al verificar el ticket.');
+        }
+
+        // FIX #2 — Guardar el ticketId en una clave separada, sin romper el flujo de sesión
+        crearSesion(chatId, { paso: 'estado', ticketId });
+
+        return bot.sendMessage(chatId, '🔄 Selecciona el nuevo estado:', {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "🟡 En proceso", callback_data: "setestado_En proceso" }],
-                    [{ text: "🟢 Cerrado", callback_data: "setestado_Cerrado" }]
-                ]
-            }
+                    [{ text: '🟡 En proceso', callback_data: 'setestado__En proceso' }],
+                    [{ text: '🟢 Cerrado', callback_data: 'setestado__Cerrado' }],
+                ],
+            },
         });
     }
 
-    if (data.startsWith("setestado_")) {
-        const nuevoEstado = data.split("_")[1];
+    // FIX #4 — split con doble guion para preservar espacios en el valor
+    if (data.startsWith('setestado__')) {
+        const nuevoEstado = data.split('__')[1]; // "En proceso" queda intacto
         const ticketId = usuarios[chatId]?.ticketId;
 
-        await actualizarEstado(ticketId, nuevoEstado);
+        if (!ticketId) {
+            return bot.sendMessage(chatId, '❌ Sesión expirada. Intenta de nuevo.');
+        }
 
-        bot.sendMessage(chatId, `✅ Ticket ${ticketId} actualizado a: ${nuevoEstado}`);
+        try {
+            await actualizarEstado(ticketId, nuevoEstado);
+            bot.sendMessage(chatId, `✅ Ticket *${ticketId}* actualizado a: *${nuevoEstado}*`, { parse_mode: 'Markdown' });
+        } catch (e) {
+            console.error(e);
+            bot.sendMessage(chatId, '❌ Error al actualizar el estado. Intenta más tarde.');
+        }
+
         delete usuarios[chatId];
         return;
     }
 
     if (!usuarios[chatId]) return;
 
-    // Tipo
-    if (data.startsWith("tipo_")) {
-        usuarios[chatId].tipo = data.split("_")[1];
-        usuarios[chatId].paso = "sucursal";
-
-        return bot.sendMessage(chatId, "🏢 ¿Qué sucursal es?");
+    // FIX #4 — separador doble en tipo__ para evitar colisión con valores compuestos
+    if (data.startsWith('tipo__')) {
+        actualizarSesion(chatId, { tipo: data.split('__')[1], paso: 'sucursal' });
+        return bot.sendMessage(chatId, '🏢 ¿En qué sucursal ocurre el problema?');
     }
 
-    // Prioridad
-    if (data.startsWith("prioridad_")) {
-        usuarios[chatId].prioridad = data.split("_")[1];
-        usuarios[chatId].paso = "confirmacion";
+    if (data.startsWith('prioridad__')) {
+        const prioridad = data.split('__')[1];
+        actualizarSesion(chatId, { prioridad, paso: 'confirmacion' });
 
         const u = usuarios[chatId];
-
-        const resumen = `
-📋 *Resumen del ticket*
-
-👤 Usuario: ${query.from.first_name}
-📌 Tipo: ${u.tipo}
-🏢 Sucursal: ${u.sucursal}
-👤 Reporta: ${u.reportante}
-📝 ${u.descripcion}
-⚡ ${u.prioridad}
-        `;
+        const resumen =
+            `📋 *Resumen del ticket*\n\n` +
+            `👤 Telegram: ${query.from.first_name}\n` +
+            `📌 Tipo: ${u.tipo}\n` +
+            `🏢 Sucursal: ${u.sucursal}\n` +
+            `👤 Reporta: ${u.reportante}\n` +
+            `📝 Descripción: ${u.descripcion}\n` +
+            `⚡ Prioridad: ${prioridad}`;
 
         return bot.sendMessage(chatId, resumen, {
-            parse_mode: "Markdown",
+            parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "✅ Confirmar", callback_data: "confirmar" }],
-                    [{ text: "❌ Cancelar", callback_data: "cancelar" }]
-                ]
-            }
+                    [{ text: '✅ Confirmar', callback_data: 'confirmar' }],
+                    [{ text: '❌ Cancelar', callback_data: 'cancelar' }],
+                ],
+            },
         });
     }
 
-    if (data === "confirmar") {
+    if (data === 'confirmar') {
         return guardarTicket(chatId, query.from);
     }
 
-    if (data === "cancelar") {
+    if (data === 'cancelar') {
         delete usuarios[chatId];
-        return bot.sendMessage(chatId, "❌ Ticket cancelado");
+        return bot.sendMessage(chatId, '❌ Ticket cancelado.');
     }
 });
 
-// 📝 MENSAJES (ACTUALIZADO 🔥)
+// ─── MENSAJES ─────────────────────────────────────────────────────────────────
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id; // FIX #3 — ID único
     const text = msg.text;
 
-    if (text === "🎫 Nuevo Ticket") return iniciarTicket(chatId);
+    if (!text) return;
+    if (text.startsWith('/')) return;
 
-    // 📋 MIS TICKETS (solo activos)
-    if (text === "📋 Mis Tickets") {
+    if (text === '🎫 Nuevo Ticket') return iniciarTicket(chatId);
+
+    // ── Mis Tickets (solo activos) ──
+    if (text === '📋 Mis Tickets') {
         try {
             const tickets = await obtenerTickets();
-
+            // FIX #3 — filtrar por userId numérico
             const lista = tickets
-                .filter(t => 
-                    t.usuario === msg.from.first_name &&
-                    t.estado !== "Cerrado"
-                )
+                .filter(t => String(t.userId) === String(userId) && t.estado !== 'Cerrado')
                 .slice(-5);
 
             if (!lista.length) {
-                return bot.sendMessage(chatId, "📭 No tienes tickets activos");
+                return bot.sendMessage(chatId, '📭 No tienes tickets activos.');
             }
 
-            for (let t of lista) {
-                await bot.sendMessage(chatId, `
-🎫 ${t.id}
-📌 ${t.tipo}
-🏢 ${t.sucursal}
-👤 ${t.reportante}
-⚡ ${t.prioridad}
-📊 ${t.estado}
-                `, {
-                    reply_markup: {
-                        inline_keyboard: [
-                            [{ text: "🔄 Cambiar estado", callback_data: "estado_" + t.id }]
-                        ]
+            for (const t of lista) {
+                await bot.sendMessage(
+                    chatId,
+                    `🎫 *${t.id}*\n📌 ${t.tipo}\n🏢 ${t.sucursal}\n👤 ${t.reportante}\n⚡ ${t.prioridad}\n📊 ${t.estado}`,
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            inline_keyboard: [
+                                [{ text: '🔄 Cambiar estado', callback_data: 'estado__' + t.id }],
+                            ],
+                        },
                     }
-                });
+                );
             }
-
         } catch (e) {
             console.error(e);
-            bot.sendMessage(chatId, "❌ Error al obtener tickets");
+            bot.sendMessage(chatId, '❌ Error al obtener tickets. Intenta más tarde.');
         }
-
         return;
     }
 
-    // 🗂 HISTORIAL (NUEVO 🔥)
-    if (text === "🗂 Historial") {
+    // ── Historial ──
+    if (text === '🗂 Historial') {
         try {
             const tickets = await obtenerTickets();
-
+            // FIX #3 — filtrar por userId numérico
             const lista = tickets
-                .filter(t => t.usuario === msg.from.first_name)
+                .filter(t => String(t.userId) === String(userId))
                 .slice(-10);
 
             if (!lista.length) {
-                return bot.sendMessage(chatId, "📭 No tienes historial");
+                return bot.sendMessage(chatId, '📭 No tienes historial de tickets.');
             }
 
-            for (let t of lista) {
-                await bot.sendMessage(chatId, `
-🎫 ${t.id}
-📌 ${t.tipo}
-🏢 ${t.sucursal}
-👤 ${t.reportante}
-⚡ ${t.prioridad}
-📊 ${t.estado}
-                `);
+            for (const t of lista) {
+                await bot.sendMessage(
+                    chatId,
+                    `🎫 *${t.id}*\n📌 ${t.tipo}\n🏢 ${t.sucursal}\n👤 ${t.reportante}\n⚡ ${t.prioridad}\n📊 ${t.estado}`,
+                    { parse_mode: 'Markdown' }
+                );
             }
-
         } catch (e) {
             console.error(e);
-            bot.sendMessage(chatId, "❌ Error al obtener historial");
+            bot.sendMessage(chatId, '❌ Error al obtener historial. Intenta más tarde.');
         }
-
         return;
     }
 
-    if (text === "❓ Ayuda") {
-        return bot.sendMessage(chatId, "Usa 🎫 para crear ticket");
+    if (text === '❓ Ayuda') {
+        return bot.sendMessage(
+            chatId,
+            '📖 *Comandos disponibles:*\n\n' +
+            '🎫 *Nuevo Ticket* — Abre un ticket de soporte\n' +
+            '📋 *Mis Tickets* — Ve tus tickets activos\n' +
+            '🗂 *Historial* — Ve todos tus tickets\n' +
+            '/cancelar — Cancela el ticket en proceso',
+            { parse_mode: 'Markdown' }
+        );
     }
 
+    // ── Flujo de creación de ticket ──
     if (!usuarios[chatId]) return;
-    if (text && text.startsWith('/')) return;
 
     const estado = usuarios[chatId];
 
-    if (estado.paso === "sucursal") {
-        estado.sucursal = text;
-        estado.paso = "reportante";
-        return bot.sendMessage(chatId, "👤 ¿Quién reporta?");
+    // FIX #5 — Ignorar texto si el paso actual espera un callback (no texto)
+    if (estado.paso === 'tipo' || estado.paso === 'prioridad' || estado.paso === 'confirmacion') {
+        return bot.sendMessage(chatId, '⬆️ Por favor usa los botones de arriba para continuar.');
     }
 
-    if (estado.paso === "reportante") {
-        estado.reportante = text;
-        estado.paso = "descripcion";
-        return bot.sendMessage(chatId, "📝 Describe el problema:");
+    if (estado.paso === 'sucursal') {
+        const error = validarTexto(text);
+        if (error) return bot.sendMessage(chatId, error);
+        actualizarSesion(chatId, { sucursal: text.trim(), paso: 'reportante' });
+        return bot.sendMessage(chatId, '👤 ¿Quién reporta el problema?');
     }
 
-    if (estado.paso === "descripcion") {
-        estado.descripcion = text;
-        estado.paso = "prioridad";
+    if (estado.paso === 'reportante') {
+        const error = validarTexto(text);
+        if (error) return bot.sendMessage(chatId, error);
+        actualizarSesion(chatId, { reportante: text.trim(), paso: 'descripcion' });
+        return bot.sendMessage(chatId, '📝 Describe el problema con detalle:');
+    }
 
-        return bot.sendMessage(chatId, "Selecciona prioridad:", {
+    if (estado.paso === 'descripcion') {
+        const error = validarTexto(text);
+        if (error) return bot.sendMessage(chatId, error);
+        actualizarSesion(chatId, { descripcion: text.trim(), paso: 'prioridad' });
+
+        return bot.sendMessage(chatId, '⚡ Selecciona la prioridad:', {
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: "🔴 Alta", callback_data: "prioridad_Alta" }],
-                    [{ text: "🟡 Media", callback_data: "prioridad_Media" }],
-                    [{ text: "🟢 Baja", callback_data: "prioridad_Baja" }]
-                ]
-            }
+                    [{ text: '🔴 Alta', callback_data: 'prioridad__Alta' }],
+                    [{ text: '🟡 Media', callback_data: 'prioridad__Media' }],
+                    [{ text: '🟢 Baja', callback_data: 'prioridad__Baja' }],
+                ],
+            },
         });
     }
 });
 
-// 💾 GUARDAR
+// ─── GUARDAR TICKET ───────────────────────────────────────────────────────────
 async function guardarTicket(chatId, user) {
     try {
-        const id = "TI-" + String(contador).padStart(4, '0');
+        // FIX #1 — El ID se genera desde Sheets, no desde un contador en memoria
+        const id = await obtenerProximoId();
         const d = usuarios[chatId];
 
-        await axios.post(SHEET_URL, {
+        const ticket = {
             id,
-            fecha: new Date().toLocaleString(),
-            usuario: user.first_name,
+            fecha: new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' }),
+            userId: user.id,           // FIX #3 — guardar ID numérico único
+            usuario: user.first_name,  // solo para display
             tipo: d.tipo,
             sucursal: d.sucursal,
             reportante: d.reportante,
             descripcion: d.descripcion,
-            prioridad: d.prioridad
-        });
+            prioridad: d.prioridad,
+            estado: 'Abierto',
+        };
 
-        bot.sendMessage(chatId, `✅ Ticket creado: ${id}`);
+        await guardarEnSheets(ticket);
+
+        bot.sendMessage(
+            chatId,
+            `✅ *Ticket creado exitosamente*\n\n🎫 ID: *${id}*\n📊 Estado: Abierto`,
+            { parse_mode: 'Markdown' }
+        );
+
+        // FIX #8 — Ahora sí se usa GRUPO_ID para notificar
+        await notificarGrupo(ticket);
 
         delete usuarios[chatId];
-        contador++;
-
     } catch (e) {
-        console.error(e);
-        bot.sendMessage(chatId, "❌ Error al guardar");
+        console.error('Error al guardar ticket:', e);
+        bot.sendMessage(chatId, '❌ Error al guardar el ticket. Intenta de nuevo en unos momentos.');
     }
 }
+
+console.log('🤖 Bot iniciado correctamente');
