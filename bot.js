@@ -29,7 +29,6 @@ function iniciarTicket(chatId) {
     });
 }
 
-const bot = new TelegramBot(token, { polling: true });
 
 // Mantener activo en Render
 require('http').createServer((req, res) => res.end('ok')).listen(3000);
